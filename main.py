@@ -29,8 +29,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-IG_USERNAME = os.getenv("IG_USERNAME")
-IG_PASSWORD = os.getenv("IG_PASSWORD")
+# Config
+IG_USERNAME = os.getenv("IG_USERNAME")        # optional if using session file
+SESSION_FILE_PATH = os.getenv("IG_SESSION_FILE")  # e.g., ".session-your_username"
+PROXY_URL = os.getenv("IG_PROXY")            # optional proxy
+
+class FetchRequest(BaseModel):
+    url: str
 
 def get_loader():
     L = instaloader.Instaloader(
@@ -42,19 +47,31 @@ def get_loader():
         compress_json=False,
         quiet=True,
     )
-    # Login if credentials available
-    if IG_USERNAME and IG_PASSWORD:
-        try:
-            L.login(IG_USERNAME, IG_PASSWORD)
-            logger.info("Logged in to Instagram successfully")
-        except Exception as e:
-            logger.warning(f"Login failed: {e}. Using anonymous mode.")
-    else:
-        logger.info("No IG credentials found. Using anonymous mode.")
-    return L
 
-class FetchRequest(BaseModel):
-    url: str
+    # Optional proxy
+    if PROXY_URL:
+        L.context._session.proxies.update({"https": PROXY_URL})
+        logger.info(f"Using proxy: {PROXY_URL}")
+
+    # Load session file if exists
+    if SESSION_FILE_PATH and os.path.exists(SESSION_FILE_PATH):
+        try:
+            L.load_session_from_file(IG_USERNAME, filename=SESSION_FILE_PATH)
+            logger.info("Session file loaded successfully")
+        except Exception as e:
+            logger.warning(f"Failed to load session file: {e}")
+
+    # Else try login if credentials provided
+    elif IG_USERNAME:
+        try:
+            IG_PASSWORD = os.getenv("IG_PASSWORD")
+            if IG_PASSWORD:
+                L.login(IG_USERNAME, IG_PASSWORD)
+                logger.info("Logged in to Instagram successfully")
+        except Exception as e:
+            logger.warning(f"Login failed: {e}. Proceeding anonymously.")
+
+    return L
 
 def extract_shortcode(url: str) -> str:
     try:
@@ -81,13 +98,24 @@ def serialize_post(p: instaloader.Post):
 
 @app.post("/api/fetch")
 async def fetch_post(req: FetchRequest):
+    shortcode = extract_shortcode(req.url)
+    L = get_loader()
+
+    # Try fetching post
     try:
-        shortcode = extract_shortcode(req.url)
-        L = get_loader()
         post = instaloader.Post.from_shortcode(L.context, shortcode)
         return serialize_post(post)
-    except instaloader.exceptions.ProfileNotExistsException:
-        raise HTTPException(status_code=404, detail="Post not found")
+    except instaloader.exceptions.ConnectionException as e:
+        logger.warning(f"Connection issue, trying anonymous fetch: {e}")
+        try:
+            # Retry with anonymous loader
+            anon_loader = instaloader.Instaloader(quiet=True)
+            post = instaloader.Post.from_shortcode(anon_loader.context, shortcode)
+            return serialize_post(post)
+        except Exception as e2:
+            logger.error("Anonymous fetch failed: %s", e2)
+            logger.error(traceback.format_exc())
+            raise HTTPException(status_code=500, detail=f"Server error: {e2}")
     except instaloader.exceptions.PrivateProfileNotFollowedException:
         raise HTTPException(status_code=403, detail="Private post. Login required or follow the user.")
     except Exception as e:
