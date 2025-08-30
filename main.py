@@ -1,4 +1,3 @@
-import os
 import logging
 import traceback
 from fastapi import FastAPI, HTTPException
@@ -19,7 +18,6 @@ origins = [
     "http://127.0.0.1:3000",
     "https://allvideodownloader.tech",
     "https://videodow01.netlify.app",
-    "http://92.113.16.59",
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -29,49 +27,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Config
-IG_USERNAME = os.getenv("IG_USERNAME")        # optional if using session file
-SESSION_FILE_PATH = os.getenv("IG_SESSION_FILE")  # e.g., ".session-your_username"
-PROXY_URL = os.getenv("IG_PROXY")            # optional proxy
-
 class FetchRequest(BaseModel):
     url: str
-
-def get_loader():
-    L = instaloader.Instaloader(
-        download_videos=False,
-        download_pictures=False,
-        download_video_thumbnails=False,
-        download_geotags=False,
-        save_metadata=False,
-        compress_json=False,
-        quiet=True,
-    )
-
-    # Optional proxy
-    if PROXY_URL:
-        L.context._session.proxies.update({"https": PROXY_URL})
-        logger.info(f"Using proxy: {PROXY_URL}")
-
-    # Load session file if exists
-    if SESSION_FILE_PATH and os.path.exists(SESSION_FILE_PATH):
-        try:
-            L.load_session_from_file(IG_USERNAME, filename=SESSION_FILE_PATH)
-            logger.info("Session file loaded successfully")
-        except Exception as e:
-            logger.warning(f"Failed to load session file: {e}")
-
-    # Else try login if credentials provided
-    elif IG_USERNAME:
-        try:
-            IG_PASSWORD = os.getenv("IG_PASSWORD")
-            if IG_PASSWORD:
-                L.login(IG_USERNAME, IG_PASSWORD)
-                logger.info("Logged in to Instagram successfully")
-        except Exception as e:
-            logger.warning(f"Login failed: {e}. Proceeding anonymously.")
-
-    return L
 
 def extract_shortcode(url: str) -> str:
     try:
@@ -96,32 +53,42 @@ def serialize_post(p: instaloader.Post):
         "comments": getattr(p, "comments", 0),
     }
 
+def get_loader():
+    # Always anonymous, safe for public posts
+    L = instaloader.Instaloader(
+        download_videos=False,
+        download_pictures=False,
+        download_video_thumbnails=False,
+        download_geotags=False,
+        save_metadata=False,
+        compress_json=False,
+        quiet=True,
+    )
+    return L
+
 @app.post("/api/fetch")
 async def fetch_post(req: FetchRequest):
     shortcode = extract_shortcode(req.url)
     L = get_loader()
 
-    # Try fetching post
     try:
         post = instaloader.Post.from_shortcode(L.context, shortcode)
         return serialize_post(post)
-    except instaloader.exceptions.ConnectionException as e:
-        logger.warning(f"Connection issue, trying anonymous fetch: {e}")
-        try:
-            # Retry with anonymous loader
-            anon_loader = instaloader.Instaloader(quiet=True)
-            post = instaloader.Post.from_shortcode(anon_loader.context, shortcode)
-            return serialize_post(post)
-        except Exception as e2:
-            logger.error("Anonymous fetch failed: %s", e2)
-            logger.error(traceback.format_exc())
-            raise HTTPException(status_code=500, detail=f"Server error: {e2}")
     except instaloader.exceptions.PrivateProfileNotFollowedException:
-        raise HTTPException(status_code=403, detail="Private post. Login required or follow the user.")
+        raise HTTPException(
+            status_code=403,
+            detail="Private post. Cannot fetch without login."
+        )
+    except instaloader.exceptions.ConnectionException as e:
+        logger.warning("Connection issue / rate-limit: %s", e)
+        raise HTTPException(
+            status_code=429,
+            detail="Instagram temporarily blocked this request. Try again later."
+        )
     except Exception as e:
-        logger.error("Error fetching post: %s", e)
+        logger.error("Unexpected error: %s", e)
         logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Server error: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/media-proxy/")
 async def media_proxy(url: str):
@@ -133,8 +100,7 @@ async def media_proxy(url: str):
             return StreamingResponse(resp.aiter_bytes(), media_type=content_type)
     except Exception as e:
         logger.error("Media proxy failed: %s", e)
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to fetch media: {e}")
+        return HTTPException(status_code=500, detail=f"Failed to fetch media: {e}")
 
 @app.get("/health")
 async def health():
