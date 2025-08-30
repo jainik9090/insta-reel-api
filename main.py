@@ -16,8 +16,6 @@ app = FastAPI(title="IG Post/Reel Fetcher", version="1.0")
 origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "https://allvideodownloader.tech",
-    "https://videodow01.netlify.app",
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -105,3 +103,4 @@ async def media_proxy(url: str):
 @app.get("/health")
 async def health():
     return {"ok": True}
+
