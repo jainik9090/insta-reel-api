@@ -29,7 +29,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Fetch Instagram credentials from environment variables
 IG_USERNAME = os.getenv("IG_USERNAME")
 IG_PASSWORD = os.getenv("IG_PASSWORD")
 
@@ -43,15 +42,15 @@ def get_loader():
         compress_json=False,
         quiet=True,
     )
-    # Login if credentials are provided
+    # Login if credentials available
     if IG_USERNAME and IG_PASSWORD:
         try:
             L.login(IG_USERNAME, IG_PASSWORD)
             logger.info("Logged in to Instagram successfully")
         except Exception as e:
-            logger.warning(f"Failed to login: {e}. Proceeding anonymously.")
+            logger.warning(f"Login failed: {e}. Using anonymous mode.")
     else:
-        logger.info("No IG credentials provided, running anonymously")
+        logger.info("No IG credentials found. Using anonymous mode.")
     return L
 
 class FetchRequest(BaseModel):
@@ -86,14 +85,15 @@ async def fetch_post(req: FetchRequest):
         shortcode = extract_shortcode(req.url)
         L = get_loader()
         post = instaloader.Post.from_shortcode(L.context, shortcode)
-        data = serialize_post(post)
-        return data
+        return serialize_post(post)
     except instaloader.exceptions.ProfileNotExistsException:
         raise HTTPException(status_code=404, detail="Post not found")
+    except instaloader.exceptions.PrivateProfileNotFollowedException:
+        raise HTTPException(status_code=403, detail="Private post. Login required or follow the user.")
     except Exception as e:
         logger.error("Error fetching post: %s", e)
-        logger.debug(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Server error: {e}")
 
 @app.get("/api/media-proxy/")
 async def media_proxy(url: str):
@@ -104,6 +104,8 @@ async def media_proxy(url: str):
             content_type = resp.headers.get("content-type", "application/octet-stream")
             return StreamingResponse(resp.aiter_bytes(), media_type=content_type)
     except Exception as e:
+        logger.error("Media proxy failed: %s", e)
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to fetch media: {e}")
 
 @app.get("/health")
